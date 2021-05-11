@@ -1,0 +1,503 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+style>
+div.blue pre { background-color:lightblue; font-size:11pt}
+div.blue pre.r { background-color:cornsilk; font-size: 11pt}
+</style>
+<div class = "blue">
+
+---
+title: "Capstone Project"
+author: "Jeffrey Wong"
+date: "03/10/2021"
+output: html_document
+---
+<font size="4">
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("~/Documents/ECON691-01")
+options(stringsAsFactors = F)
+myPalette01 <- rep(RColorBrewer::brewer.pal(12, 'Set1'), times=3)
+myPalette02 <- rep(RColorBrewer::brewer.pal(11, 'PuOr'), times=2)
+library(tidyverse)
+library(grf)
+```
+
+
+```{r data prep}
+
+data <- read.csv('discon_full_mkt02.csv', row.names = 1, stringsAsFactors = T)
+# rearrange the data in chronological order to prevent data leakage
+data$Announce.Date <-  as.Date(data$Announce.Date, format='%Y-%m-%d')
+data <- data[order(data$Announce.Date, data$acqID, data$day),]
+# log the prices
+data$log_price <- log(data$price)
+data$log_DJ <- log(data$DJ)
+data$log_SP500 <- log(data$SP500)
+data$log_NASDAQ <- log(data$NASDAQ)
+# factorise acq ID
+data$acqID <- as.factor(data$acqID)
+
+data <- data[,c(1,6,7,13:ncol(data))]
+
+
+# split the data into splitting and estimating set
+id <- unique(data$acqID)
+cases <- id[1:round(length(id) * .6)]
+train <- data[which(data$acqID %in% cases), c(1:14)]
+test <- data[-which(data$acqID %in% cases), c(1:14)]
+
+cf <- causal_forest(
+  X = model.matrix(~ ., data = train[, -c(4,11)]),
+  Y = train$log_price,
+  W = train$M_A,
+  num.trees = 5000,
+  seed = 12345,
+  min.node.size = 10)
+
+#predict using the test set
+preds <- predict(
+  object = cf, 
+  newdata = model.matrix(~ ., data = test[, -c(4,11)]), 
+  estimate.variance = TRUE)
+
+test$preds <- preds$predictions
+
+
+
+ATE <- average_treatment_effect(cf)
+paste("95% CI for the ATE:", round(ATE[1], 3), "+/-", round(qnorm(0.975) * ATE[2], 3))
+
+
+ggplot(test, aes(x=preds)) + geom_histogram() + theme_light() + 
+  labs(x='Estimated Treatment', y='Frequency')
+
+high_effect <- (test$preds > median(test$preds))
+
+
+test_calibration(cf)
+
+features <- cf %>% 
+  variable_importance() %>% 
+  as.data.frame() %>% 
+  mutate(variable = colnames(cf$X.orig)) %>% 
+  arrange(desc(V1))
+
+features <- features[features$V1>0.004,]
+
+ggplot(data=features, aes(x=V1, y=reorder(variable, V1))) + geom_point() + 
+  theme_light() + labs(x="Importance", y="")
+
+
+p1 <- ggplot(test, aes(x = log_NASDAQ, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()
+
+p2 <- ggplot(test, aes(x = log_DJ, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()
+
+p3 <- ggplot(test, aes(x = libor_12M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 1) +
+  theme_light()
+
+p4 <- ggplot(test, aes(x = libor_1M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 1) +
+  theme_light()
+
+cowplot::plot_grid(p1, p2, p3, p4)
+
+plot_htes(preds, ci=T)
+```
+
+
+```{r quantile analysis}
+
+# split into 4 quantiles depending on the log price before M&A
+tiles <- quantile(data[data$M_A==0,]$log_price)
+
+#set the data into 4 quantiles
+data$tile <- unlist(lapply(seq(1:dim(data)[1]), function(x)
+{
+  if (data$log_price[x]<=tiles[[2]])
+  {1}
+  else if (data$log_price[x]>tiles[[2]] & data$log_price[x]<=tiles[[3]])
+  {2}
+  else if (data$log_price[x]>tiles[[3]] & data$log_price[x]<=tiles[[4]])
+  {3}
+  else {4}
+}
+))
+# split data into 4 quantiles
+data1 <- data[data$tile==1,]
+data2 <- data[data$tile==2,]
+data3 <- data[data$tile==3,]
+data4 <- data[data$tile==4,]
+
+
+
+# split the dataset into train and test
+id <- unique(data1$acqID)
+cases <- id[1:round(length(id) * .6)]
+train1 <- data1[which(data1$acqID %in% cases), c(1:14)]
+test1 <- data1[-which(data1$acqID %in% cases), c(1:14)]
+
+id <- unique(data2$acqID)
+cases <- id[1:round(length(id) * .6)]
+train2 <- data2[which(data2$acqID %in% cases), c(1:14)]
+test2 <- data2[-which(data2$acqID %in% cases), c(1:14)]
+
+id <- unique(data3$acqID)
+cases <- id[1:round(length(id) * .6)]
+train3 <- data3[which(data3$acqID %in% cases), c(1:14)]
+test3 <- data3[-which(data3$acqID %in% cases), c(1:14)]
+
+id <- unique(data4$acqID)
+cases <- id[1:round(length(id) * .6)]
+train4 <- data4[which(data4$acqID %in% cases), c(1:14)]
+test4 <- data4[-which(data4$acqID %in% cases), c(1:14)]
+
+
+
+```
+
+
+```{r HTE function}
+plot_htes <- function(cf_preds, ci = FALSE, z = 1.96) {
+  if (is.null(cf_preds$predictions) )
+    stop("cf_preds must include a matrix called 'predictions'")
+  
+  out <- ggplot(
+    mapping = aes(
+      x = rank(cf_preds$predictions), 
+      y = cf_preds$predictions
+    )
+  ) +
+    geom_point() +
+    labs(x = "Rank", y = "Estimated Treatment Effect") +
+    theme_light()
+  
+  if (ci) {
+    out <- out +
+      geom_errorbar(
+        mapping = aes(
+          ymin = cf_preds$predictions + z * sqrt(cf_preds$variance.estimates),
+          ymax = cf_preds$predictions - z * sqrt(cf_preds$variance.estimates)
+        )
+      )
+  }
+    
+  return(out)
+}
+```
+
+#train the causal forest with train set
+cf1 <- causal_forest(
+  X = model.matrix(~ ., data = train1[, -c(4, 15, 5:8, 19)]),
+  Y = train1$log_price,
+  W = train1$M_A,
+  num.trees = 5000,
+  seed = 12345,
+  min.node.size = 10
+)
+
+
+
+#predict using the test set
+preds1 <- predict(
+  object = cf1, 
+  newdata = model.matrix(~ ., data = test1[, -c(4, 15, 5:8, 19)]), 
+  estimate.variance = TRUE
+)
+
+test1$preds <- preds1$predictions
+
+plot(test1$log_price, preds1$predictions, xlab = "Log_price", ylab = "preds", type = "l")
+
+ggplot(test1, aes(x = log_price, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 1) +
+  theme_light()
+
+
+#check feature importances
+
+features1 <- cf1 %>% 
+  variable_importance() %>% 
+  as.data.frame() %>% 
+  mutate(variable = colnames(cf1$X.orig)) %>% 
+  arrange(desc(V1))
+
+
+features1 <- features1[features1$V1>0.0005,]
+
+ggplot(data=features1, aes(x=V1, y=reorder(variable, V1))) + geom_point() + 
+  theme_light()
+
+
+p1 <- ggplot(test1, aes(x = libor_3M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 1) +
+  theme_light()
+
+p2 <- ggplot(test1, aes(x = log_SP500, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 1) +
+  theme_light()
+
+p3 <- ggplot(test1, aes(x = libor_12M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 1) +
+  theme_light()
+
+p4 <- ggplot(test1, aes(x = log_DJ, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 1) +
+  theme_light()
+
+cowplot::plot_grid(p1, p2, p3, p4)
+
+
+
+```{r tile 1}
+
+cf1 <- causal_forest(
+  X = model.matrix(~ ., data = train1[, -c(4, 11)]),
+  Y = train1$log_price,
+  W = train1$M_A,
+  num.trees = 5000,
+  seed = 12345,
+  min.node.size = 10
+)
+
+#predict using the test set
+preds1 <- predict(
+  object = cf1, 
+  newdata = model.matrix(~ ., data = test1[, -c(4, 11)]), 
+  estimate.variance = TRUE)
+test1$preds <- preds1$predictions
+
+ggplot(test1, aes(x=preds)) + geom_histogram() + theme_light() + 
+  labs(x='Estimated Treatment', y='Frequency')
+
+test_calibration(cf1)
+```
+
+
+
+```{r tile 2}
+#tile 2
+
+cf2 <- causal_forest(
+  X = model.matrix(~ ., data = train2[, -c(4, 11)]),
+  Y = train2$log_price,
+  W = train2$M_A,
+  num.trees = 5000,
+  seed = 12345,
+  min.node.size = 10
+)
+
+
+
+#predict using the test set
+preds2 <- predict(
+  object = cf2, 
+  newdata = model.matrix(~ ., data = test2[, -c(4, 11)]), 
+  estimate.variance = TRUE
+)
+
+test2$preds <- preds2$predictions
+
+ggplot(test2, aes(x=preds)) + geom_histogram() + theme_light() + 
+  labs(x='Estimated Treatment', y='Frequency')
+
+test_calibration(cf2)
+
+```
+
+
+```{r tile 3}
+
+cf3 <- causal_forest(
+  X = model.matrix(~ ., data = train3[, -c(4, 11)]),
+  Y = train3$log_price,
+  W = train3$M_A,
+  num.trees = 5000,
+  seed = 12345,
+  min.node.size = 10
+)
+
+#predict using the test set
+preds3 <- predict(
+  object = cf3, 
+  newdata = model.matrix(~ ., data = test3[, -c(4, 11)]), 
+  estimate.variance = TRUE
+)
+
+test3$preds <- preds3$predictions
+
+ggplot(test3, aes(x=preds)) + geom_histogram() + theme_light() + 
+  labs(x='Estimated Treatment', y='Frequency')
+
+test_calibration(cf3)
+
+```
+
+
+```{r tile 4}
+
+cf4 <- causal_forest(
+  X = model.matrix(~ ., data = train4[, -c(4, 11)]),
+  Y = train4$log_price,
+  W = train4$M_A,
+  num.trees = 5000,
+  seed = 12345,
+  min.node.size = 10
+)
+
+#predict using the test set
+preds4 <- predict(
+  object = cf4, 
+  newdata = model.matrix(~ ., data = test4[, -c(4, 11)]), 
+  estimate.variance = TRUE
+)
+test4$preds <- preds4$predictions
+
+ggplot(test4, aes(x=preds)) + geom_histogram() + theme_light() + 
+  labs(x='Estimated Treatment', y='Frequency')
+
+test_calibration(cf4)
+```
+
+
+```{r treatment effects}
+p1 <- ggplot(test1, aes(x = log_NASDAQ, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light() + labs(title = "1st Quantile")
+
+p2 <- ggplot(test1, aes(x = log_DJ, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light() + labs(title = "1st Quantile")
+
+p3 <- ggplot(test2, aes(x = log_NASDAQ, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light() + labs(title = "2nd Quantile")
+
+p4 <- ggplot(test2, aes(x = log_DJ, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()  + labs(title = "2nd Quantile")
+
+p5 <- ggplot(test3, aes(x = log_NASDAQ, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()  + labs(title = "3rd Quantile")
+
+p6 <- ggplot(test3, aes(x = log_DJ, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()  + labs(title = "3rd Quantile")
+
+p7 <- ggplot(test4, aes(x = log_NASDAQ, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()  + labs(title = "4th Quantile")
+
+p8 <- ggplot(test4, aes(x = log_DJ, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()  + labs(title = "4th Quantile")
+
+cowplot::plot_grid(p1, p2, NULL,
+                   p3, p4, NULL,
+                   p5, p6, NULL,
+                   p7, p8, ncol = 3)
+
+
+# HTE check
+p1 <- ggplot(test1, aes(x = libor_1M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light() + labs(title = "1st Quantile")
+
+p2 <- ggplot(test1, aes(x = libor_12M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light() + labs(title = "1st Quantile")
+
+p3 <- ggplot(test2, aes(x = libor_1M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light() + labs(title = "2nd Quantile")
+
+p4 <- ggplot(test2, aes(x = libor_12M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()  + labs(title = "2nd Quantile")
+
+p5 <- ggplot(test3, aes(x = libor_1M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()  + labs(title = "3rd Quantile")
+
+p6 <- ggplot(test3, aes(x = libor_12M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()  + labs(title = "3rd Quantile")
+
+p7 <- ggplot(test4, aes(x = libor_1M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()  + labs(title = "4th Quantile")
+
+p8 <- ggplot(test4, aes(x = libor_12M, y = preds)) +
+  geom_point(size=1) +
+  geom_smooth(method = "loess", span = 0.5) +
+  theme_light()  + labs(title = "4th Quantile")
+
+cowplot::plot_grid(p1, p2, NULL,
+                   p3, p4, NULL,
+                   p5, p6, NULL,
+                   p7, p8, ncol=3)
+
+```
+
+```{r}
+t1 <- plot_htes(preds1, ci=T)
+t2 <- plot_htes(preds2, ci=T)
+t3 <- plot_htes(preds3, ci=T)
+t4 <- plot_htes(preds4, ci=T)
+
+cowplot::plot_grid(t1, t2, t3, t4, labels = c('1st Quantile', 
+                                              '2nd Quantile',
+                                              '3rd Quantile',
+                                              '4th Quantile'))
+
+
+```
+
+```{r OLS}
+
+variables <- data3[,c(1, 6:8, 10:ncol(data3))]
+X <- colnames(variables[, -c(4, 15, 5:8, 19)])
+
+colnames(variables)
+
+OLS <- lm(log_price ~ day + libor_1M + libor_2M + libor_3M + libor_6M +
+            libor_12M + log_DJ+log_SP500+log_NASDAQ + M_A, data= data4)
+summary(OLS)
+
+```
+
+</font>
